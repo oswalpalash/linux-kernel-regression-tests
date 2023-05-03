@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - collect.py
+      - fetch.py
       - .github/workflows/fetch.yml
   pull_request:
     branches: [ "main" ]
