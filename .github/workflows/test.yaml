@@ -79,16 +79,17 @@ jobs:
 
     - name: Start QEMU VM and run tests
       run: |
+        TEMP_SERIAL_LOG=$(mktemp)
         qemu-system-x86_64 \
           -m 1024 \
           -smp 2 \
-          -serial stdio \
           -drive file=ubuntu-20.04-server-cloudimg-amd64.img,format=qcow2 \
           -drive file=user-data.img,format=raw \
           -net user,hostfwd=tcp::2222-:22 \
           -net nic \
           -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
           -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
+          -serial file:$TEMP_SERIAL_LOG \
           -display none \
           -daemonize
         sleep 100  # Adjust as necessary to ensure the VM is fully booted
@@ -102,3 +103,11 @@ jobs:
         $SSH_CMD 'sudo mkdir /mnt/hostshare && sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/hostshare'
         # Execute each test file in the compiled directory of the repo
         $SSH_CMD 'for test_file in /mnt/hostshare/compiled/*; do echo Running $test_file; timeout 5s $test_file || exit 1; done'
+
+    - name: Display QEMU Serial Output
+      if: always() # Ensure this step runs even if previous steps fail
+      run: |
+        if [ -f "$TEMP_SERIAL_LOG" ]; then
+          echo "QEMU Serial Output:"
+          cat "$TEMP_SERIAL_LOG"
+        fi
