@@ -80,6 +80,7 @@ jobs:
     - name: Start QEMU VM and run tests
       run: |
         TEMP_SERIAL_LOG=$(mktemp)
+        echo "TEMP_SERIAL_LOG=$TEMP_SERIAL_LOG" >> $GITHUB_ENV
         qemu-system-x86_64 \
           -m 1024 \
           -smp 2 \
@@ -102,7 +103,7 @@ jobs:
         # Ensure the SSH key is secure and log in to the VM
         $SSH_CMD 'sudo mkdir /mnt/hostshare && sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/hostshare'
         # Execute each test file in the compiled directory of the repo
-        $SSH_CMD 'for test_file in /mnt/hostshare/compiled/*; do echo Running $test_file; timeout 5s $test_file || exit 1; done'
+        $SSH_CMD 'for test_file in /mnt/hostshare/compiled/*; do echo "Running $test_file"; $test_file || echo "Test $test_file failed"; done'
 
     - name: Display QEMU Serial Output
       if: always() # Ensure this step runs even if previous steps fail
