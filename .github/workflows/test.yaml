@@ -1,0 +1,62 @@
+name: Run Tests in QEMU VM
+
+on: [push, pull_request]
+
+jobs:
+  test-in-qemu:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check Out Repository
+      uses: actions/checkout@v2
+
+    - name: Install QEMU and Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu qemu-kvm cloud-image-utils sshpass
+
+    - name: Generate SSH Key for VM Access
+      run: |
+        ssh-keygen -t rsa -b 4096 -f "${{ github.workspace }}/ssh_key" -q -N ""
+        echo "${{ github.workspace }}/ssh_key" >> $GITHUB_ENV
+
+    - name: Prepare Cloud-Init Configuration for VM
+      run: |
+        echo "#cloud-config" > user-data
+        echo "ssh_authorized_keys:" >> user-data
+        echo "  - $(cat ${{ github.workspace }}/ssh_key.pub)" >> user-data
+        cloud-localds user-data.img user-data
+
+    - name: Download Ubuntu Server VM Image
+      run: |
+        wget https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64.img
+
+    - name: Start QEMU VM with Repository Mounted
+      run: |
+        qemu-system-x86_64 \
+          -m 1024 \
+          -smp 2 \
+          -drive file=ubuntu-20.04-server-cloudimg-amd64.img,format=qcow2 \
+          -drive file=user-data.img,format=raw \
+          -nic user,model=virtio-net-pci \
+          -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
+          -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
+          -daemonize
+
+    - name: Wait for VM to Start
+      run: |
+        sleep 60  # Adjust as necessary to ensure the VM is fully booted
+
+    - name: Run Tests in VM
+      run: |
+        chmod 600 ${{ github.workspace }}/ssh_key
+        SSH_KEY_FILE="${{ github.workspace }}/ssh_key"
+        VM_IP="localhost"
+        VM_PORT="2222"  # Adjust port as necessary for SSH access
+        SSH_CMD="ssh -i $SSH_KEY_FILE -o StrictHostKeyChecking=no -p $VM_PORT ubuntu@$VM_IP"
+
+        # Ensure the SSH key is secure and log in to the VM
+        $SSH_CMD 'sudo mkdir /mnt/hostshare && sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/hostshare'
+
+        # Execute each test file in the compiled directory of the repo
+        $SSH_CMD 'for test_file in /mnt/hostshare/compiled/*; do echo Running $test_file; $test_file || exit 1; done'
