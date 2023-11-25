@@ -85,6 +85,7 @@ jobs:
           -drive file=ubuntu-20.04-server-cloudimg-amd64.img,format=qcow2 \
           -drive file=user-data.img,format=raw \
           -net user,hostfwd=tcp::2222-:22 \
+          -net nic \
           -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
           -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
           -display none \
@@ -92,9 +93,10 @@ jobs:
         sleep 60  # Adjust as necessary to ensure the VM is fully booted
         chmod 600 ${{ github.workspace }}/ssh_key
         SSH_KEY_FILE="${{ github.workspace }}/ssh_key"
-        VM_IP="localhost"
-        VM_PORT="2222"  # Adjust port as necessary for SSH access
-        SSH_CMD="ssh -i $SSH_KEY_FILE -o StrictHostKeyChecking=no -p $VM_PORT ubuntu@$VM_IP"
+        SSH_CMD="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -p 2222 ubuntu@localhost"
+        for i in {1..5}; do
+          $SSH_CMD 'echo "SSH connection successful"' && break || sleep 10
+        done
         # Ensure the SSH key is secure and log in to the VM
         $SSH_CMD 'sudo mkdir /mnt/hostshare && sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/hostshare'
         # Execute each test file in the compiled directory of the repo
