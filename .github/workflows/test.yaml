@@ -87,7 +87,7 @@ jobs:
           -nic user,model=virtio-net-pci \
           -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
           -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
-          -nographic \
+          -display none \
           -daemonize
 
     - name: Wait for VM to Start
