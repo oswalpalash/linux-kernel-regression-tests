@@ -64,7 +64,7 @@ jobs:
     - name: Generate SSH Key for VM Access
       run: |
         ssh-keygen -t rsa -b 4096 -f "${{ github.workspace }}/ssh_key" -q -N ""
-        echo "${{ github.workspace }}/ssh_key" >> $GITHUB_ENV
+        echo "SSH_KEY=${{ github.workspace }}/ssh_key" >> $GITHUB_ENV
 
     - name: Prepare Cloud-Init Configuration for VM
       run: |
