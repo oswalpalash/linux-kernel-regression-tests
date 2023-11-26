@@ -107,7 +107,7 @@ jobs:
         for test_file in /mnt/hostshare/compiled/*; do
             echo "Running $test_file"
             dir=$(mktemp -d)
-            (cd $dir && timeout -s KILL 3 $test_file)
+            (cd $dir && sudo timeout -s KILL 3 $test_file)
             result=$?
             rm -rf $dir
             if [ $result -ne 0 ]; then
