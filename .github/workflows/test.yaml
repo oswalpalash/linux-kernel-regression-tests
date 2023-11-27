@@ -59,23 +59,17 @@ jobs:
     - name: Install QEMU and Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y qemu qemu-kvm cloud-image-utils sshpass
-
-    - name: Generate SSH Key for VM Access
+        sudo apt-get install -y qemu qemu-kvm cloud-image-utils sshpass xz-utils
+        
+    - name: Download and Extract Syzbot disk image
       run: |
-        ssh-keygen -t rsa -b 4096 -f "${{ github.workspace }}/ssh_key" -q -N ""
-        echo "SSH_KEY=${{ github.workspace }}/ssh_key" >> $GITHUB_ENV
+        wget -O disk.raw.xz https://storage.googleapis.com/syzbot-assets/e271179068c6/disk-76df934c.raw.xz
+        unxz disk.raw.xz
 
-    - name: Prepare Cloud-Init Configuration for VM
+    - name: Download and Extract Syzbot kernel image
       run: |
-        echo "#cloud-config" > user-data
-        echo "ssh_authorized_keys:" >> user-data
-        echo "  - $(cat ${{ github.workspace }}/ssh_key.pub)" >> user-data
-        cloud-localds user-data.img user-data
-
-    - name: Download Ubuntu Server VM Image
-      run: |
-        wget https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64.img
+        wget -O vmlinux.xz https://storage.googleapis.com/syzbot-assets/b9523b3749bb/vmlinux-76df934c.xz
+        unxz vmlinux.xz
 
     - name: Start QEMU VM and run tests
       run: |
@@ -84,19 +78,17 @@ jobs:
         qemu-system-x86_64 \
           -m 1024 \
           -smp 2 \
-          -drive file=ubuntu-20.04-server-cloudimg-amd64.img,format=qcow2 \
-          -drive file=user-data.img,format=raw \
+          -kernel ./vmlinux \
+          -drive file=./disk.raw,format=raw \
           -net user,hostfwd=tcp::2222-:22 \
-          -net nic \
           -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
           -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
-          -serial file:$TEMP_SERIAL_LOG \
+          -net nic \
           -display none \
+          -serial file:$TEMP_SERIAL_LOG \
           -daemonize
         sleep 100  # Adjust as necessary to ensure the VM is fully booted
-        chmod 600 ${{ github.workspace }}/ssh_key
-        SSH_KEY_FILE="${{ github.workspace }}/ssh_key"
-        SSH_CMD="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -p 2222 ubuntu@localhost"
+        SSH_CMD="ssh -o StrictHostKeyChecking=no -p 2222 root@localhost"
         for i in {1..5}; do
           $SSH_CMD 'echo "SSH connection successful"' && break || sleep 10
         done
@@ -107,7 +99,7 @@ jobs:
         for test_file in /mnt/hostshare/compiled/*; do
             echo "Running $test_file"
             dir=$(mktemp -d)
-            (cd $dir && sudo timeout -s KILL 3 $test_file)
+            (cd $dir && timeout -s KILL 3 $test_file)
             result=$?
             rm -rf $dir
             if [ $result -ne 0 ]; then
