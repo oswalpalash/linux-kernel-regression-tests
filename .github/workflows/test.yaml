@@ -86,7 +86,7 @@ jobs:
           -net nic,model=e1000 \
           -net user,host=10.0.2.10,hostfwd=tcp::2222-:22 \
           -enable-kvm \
-          -graphic none \
+          -display none \
           -snapshot \
           -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
           -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
