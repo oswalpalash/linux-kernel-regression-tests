@@ -55,6 +55,10 @@ jobs:
         sudo apt-get autoremove -y >/dev/null 2>&1 || true
         sudo apt-get autoclean -y >/dev/null 2>&1 || true
     - uses: actions/checkout@v4
+      with:
+        sparse-checkout: |
+          compiled
+
 
     - name: Install QEMU and Dependencies
       run: |
