@@ -80,15 +80,14 @@ jobs:
         TEMP_SERIAL_LOG=$(mktemp)
         echo "TEMP_SERIAL_LOG=$TEMP_SERIAL_LOG" >> $GITHUB_ENV
         qemu-system-x86_64 \
-          -m 1024 \
-          -smp 2 \
-          -kernel ./vmlinux \
+          -m 2G \
+          -smp 2,sockets=2,cores=1 \
           -drive file=./disk.raw,format=raw \
-          -net user,hostfwd=tcp::2222-:22 \
-          -fsdev local,id=fsdev0,path=${{ github.workspace }},security_model=mapped-file \
-          -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
-          -net nic \
-          -display none \
+          -net nic,model=e1000 \
+          -net user,host=10.0.2.10,hostfwd=tcp::2222-:22 \
+          -enable-kvm \
+          -nographic \
+          -snapshot \
           -serial file:$TEMP_SERIAL_LOG \
           -daemonize
         sleep 100  # Adjust as necessary to ensure the VM is fully booted
