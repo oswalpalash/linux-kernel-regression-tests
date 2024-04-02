@@ -70,7 +70,13 @@ jobs:
           sphinxsearch subversion mongodb-org -yq >/dev/null 2>&1 || true
         sudo apt-get autoremove -y >/dev/null 2>&1 || true
         sudo apt-get autoclean -y >/dev/null 2>&1 || true
-    - uses: actions/checkout@v3
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 512
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v3
       with:
