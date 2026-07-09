@@ -1,28 +1,38 @@
 name: Run Tests in QEMU VM
 
+# Compile each C repro *inside* a QEMU guest and run it with a short timeout.
+# The full tree (~45k sources) is partitioned across matrix shards so the suite
+# can finish within GitHub Actions job limits.
+
 on:
   workflow_dispatch:
     inputs:
-      sample_size:
-        description: 'Number of random repros to compile and run'
+      shard_count:
+        description: 'Number of parallel shards covering all crepros'
         required: false
         default: '32'
+      run_timeout:
+        description: 'Per-repro run timeout seconds inside the guest'
+        required: false
+        default: '5'
+      limit_per_shard:
+        description: 'Max sources per shard (0 = all assigned to that shard)'
+        required: false
+        default: '0'
   push:
     branches: [main]
     paths:
       - crepros/**
-      - compile.sh
       - scripts/**
       - .github/workflows/test.yaml
   pull_request:
     branches: [main]
     paths:
       - crepros/**
-      - compile.sh
       - scripts/**
       - .github/workflows/test.yaml
   schedule:
-    # Weekly smoke regression (full suite is too large for GHA)
+    # Weekly full suite
     - cron: '0 3 * * 1'
 
 permissions:
@@ -33,12 +43,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-in-qemu:
+  # Generate shard id list so workflow_dispatch can change shard_count.
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    outputs:
+      shards: ${{ steps.set.outputs.shards }}
+      shard_count: ${{ steps.set.outputs.shard_count }}
+      run_timeout: ${{ steps.set.outputs.run_timeout }}
+      limit: ${{ steps.set.outputs.limit }}
+    steps:
+      - id: set
+        run: |
+          # Defaults: full coverage in 32 shards, 5s run timeout.
+          SC="${{ github.event.inputs.shard_count || '32' }}"
+          RT="${{ github.event.inputs.run_timeout || '5' }}"
+          LIM="${{ github.event.inputs.limit_per_shard || '0' }}"
+          # On pull_request use a tiny smoke so PRs stay cheap; push/schedule/full dispatch use SC.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SC=2
+            LIM=20
+          fi
+          python3 - "$SC" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, sys
+          n = int(sys.argv[1])
+          print(f"shard_count={n}")
+          print(f"shards={json.dumps(list(range(n)))}")
+          PY
+          echo "run_timeout=$RT" >> "$GITHUB_OUTPUT"
+          echo "limit=$LIM" >> "$GITHUB_OUTPUT"
+          echo "Planned shards=$SC run_timeout=$RT limit=$LIM"
+
+  test-in-qemu:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     env:
-      SAMPLE_SIZE: ${{ github.event.inputs.sample_size || '32' }}
-      SSH_PORT: '2222'
+      SHARD_INDEX: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
+      RUN_TIMEOUT: ${{ needs.plan.outputs.run_timeout }}
+      LIMIT: ${{ needs.plan.outputs.limit }}
+      SSH_PORT: ${{ 2200 + matrix.shard }}
+      ARTIFACT_DIR: ${{ github.workspace }}/.qemu-run
     steps:
       - uses: actions/checkout@v4
 
@@ -49,209 +98,74 @@ jobs:
           sudo docker system prune -af || true
           df -h
 
-      - name: Install dependencies
+      - name: Install host dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
-            gcc-multilib genisoimage cloud-utils
+            genisoimage cloud-utils
           sudo chmod 666 /dev/kvm 2>/dev/null || true
 
-      - name: Build sample of reproducers
+      - name: Run shard in QEMU (compile + exec in guest)
         run: |
-          set -euo pipefail
-          chmod +x ./compile.sh
-          python3 - "$SAMPLE_SIZE" "${{ github.run_id }}" <<'PY' > /tmp/sample-list.txt
-          import os, random, sys
-          take, seed = int(sys.argv[1]), sys.argv[2]
-          files = [
-              os.path.join("crepros", f)
-              for f in os.listdir("crepros")
-              if f.endswith(".c")
-          ]
-          random.seed(seed)
-          random.shuffle(files)
-          take = min(take, len(files))
-          for f in files[:take]:
-              print(f)
-          print(f"Selected {take} of {len(files)} reproducers", file=sys.stderr)
-          PY
-          mapfile -t sample < /tmp/sample-list.txt
-          ./compile.sh --jobs "$(nproc)" --force "${sample[@]}"
-          find compiled -type f ! -name '*.err' | wc -l
+          chmod +x scripts/run-qemu-repros.sh scripts/guest-run-repros.sh
+          ./scripts/run-qemu-repros.sh
 
-      - name: Prepare Debian cloud image + cloud-init
-        run: |
-          set -euo pipefail
-          img_url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
-          wget -q --show-progress -O disk.qcow2 "$img_url"
-          qemu-img resize disk.qcow2 4G
-
-          ssh-keygen -t ed25519 -N '' -f "${{ github.workspace }}/id_rsa" -C "lkrt-ci"
-          PUB=$(cat "${{ github.workspace }}/id_rsa.pub")
-
-          cat > user-data <<EOF
-          #cloud-config
-          hostname: lkrt-ci
-          manage_etc_hosts: true
-          disable_root: false
-          ssh_pwauth: false
-          package_update: false
-          users:
-            - default
-            - name: root
-              lock_passwd: true
-              ssh_authorized_keys:
-                - ${PUB}
-          write_files:
-            - path: /etc/ssh/sshd_config.d/60-lkrt.conf
-              permissions: "0644"
-              content: |
-                PermitRootLogin prohibit-password
-                PasswordAuthentication no
-                PubkeyAuthentication yes
-            - path: /root/.ssh/authorized_keys
-              permissions: "0600"
-              owner: root:root
-              content: |
-                ${PUB}
-          runcmd:
-            - [ bash, -c, "mkdir -p /home/debian/.ssh /root/.ssh /root/repros" ]
-            - [ bash, -c, "echo '${PUB}' >> /home/debian/.ssh/authorized_keys && chown -R debian:debian /home/debian/.ssh && chmod 700 /home/debian/.ssh && chmod 600 /home/debian/.ssh/authorized_keys" ]
-            - [ bash, -c, "echo '${PUB}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" ]
-            - [ systemctl, restart, ssh ]
-          EOF
-          sed -i 's/^          //' user-data
-
-          cat > meta-data <<EOF
-          instance-id: lkrt-ci-${{ github.run_id }}
-          local-hostname: lkrt-ci
-          EOF
-          sed -i 's/^          //' meta-data
-
-          cloud-localds seed.iso user-data meta-data
-          cat user-data
-
-      - name: Boot QEMU and run sample
-        run: |
-          set -euo pipefail
-          SERIAL_LOG="$RUNNER_TEMP/qemu-serial.log"
-          QEMU_PID_FILE="$RUNNER_TEMP/qemu.pid"
-          : > "$SERIAL_LOG"
-          echo "SERIAL_LOG=$SERIAL_LOG" >> "$GITHUB_ENV"
-          echo "QEMU_PID_FILE=$QEMU_PID_FILE" >> "$GITHUB_ENV"
-
-          ACCEL=tcg
-          if [ -r /dev/kvm ]; then ACCEL=kvm; fi
-          echo "Using accel=$ACCEL"
-
-          # Stock Debian cloud kernels often lack 9p; copy repros in via scp.
-          qemu-system-x86_64 \
-            -name lkrt-ci \
-            -machine "pc,accel=$ACCEL" \
-            -m 2G \
-            -smp 2 \
-            -drive file=disk.qcow2,format=qcow2,if=virtio \
-            -drive file=seed.iso,format=raw,if=virtio,media=cdrom \
-            -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
-            -device virtio-net-pci,netdev=net0 \
-            -display none \
-            -serial file:"$SERIAL_LOG" \
-            -pidfile "$QEMU_PID_FILE" \
-            -daemonize
-
-          SSH_BASE=(ssh -i "${{ github.workspace }}/id_rsa"
-            -o StrictHostKeyChecking=no
-            -o UserKnownHostsFile=/dev/null
-            -o ConnectTimeout=10
-            -o LogLevel=ERROR
-            -p "$SSH_PORT")
-          SCP_BASE=(scp -i "${{ github.workspace }}/id_rsa"
-            -o StrictHostKeyChecking=no
-            -o UserKnownHostsFile=/dev/null
-            -o ConnectTimeout=10
-            -o LogLevel=ERROR
-            -P "$SSH_PORT")
-
-          echo "Waiting for SSH (debian@ then root@)..."
-          USER=""
-          for i in $(seq 1 90); do
-            if "${SSH_BASE[@]}" debian@127.0.0.1 'echo up' 2>/dev/null; then
-              USER=debian
-              break
-            fi
-            if "${SSH_BASE[@]}" root@127.0.0.1 'echo up' 2>/dev/null; then
-              USER=root
-              break
-            fi
-            sleep 5
-          done
-          if [ -z "$USER" ]; then
-            echo "SSH never came up"
-            tail -n 200 "$SERIAL_LOG" || true
-            exit 1
-          fi
-          echo "SSH ready as $USER"
-
-          SSH=("${SSH_BASE[@]}" "${USER}@127.0.0.1")
-          # Prefer root so scp/run do not fight ownership. If only debian is
-          # available, create the target dir as debian (no sudo) — sudo mkdir
-          # would make it root-owned and scp would get Permission denied.
-          if [ "$USER" = "root" ]; then
-            REMOTE_DIR=/root/repros
-            RUN_AS=("${SSH[@]}")
-          else
-            REMOTE_DIR=/home/debian/repros
-            RUN_AS=("${SSH[@]}")
-          fi
-
-          "${SSH[@]}" mkdir -p "$REMOTE_DIR"
-          "${SCP_BASE[@]}" -r compiled/. "${USER}@127.0.0.1:${REMOTE_DIR}/"
-          "${SSH[@]}" "ls '$REMOTE_DIR' | wc -l"
-
-          "${RUN_AS[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
-          set +e
-          ran=0
-          for test_file in "$REMOTE_DIR"/*; do
-            [ -e "$test_file" ] || continue
-            [ -f "$test_file" ] || continue
-            case "$test_file" in
-              *.err) continue ;;
-            esac
-            chmod +x "$test_file" 2>/dev/null
-            echo "=== RUN $test_file ==="
-            dir=$(mktemp -d)
-            (cd "$dir" && timeout -s KILL 3 "$test_file")
-            rc=$?
-            echo "=== EXIT $rc $test_file ==="
-            rm -rf "$dir"
-            ran=$((ran + 1))
-          done
-          echo "RAN=$ran"
-          if [ "$ran" -eq 0 ]; then
-            echo "No binaries executed"
-            exit 1
-          fi
-          exit 0
-          EOF
-
-          if [ -f "$QEMU_PID_FILE" ]; then
-            kill "$(cat "$QEMU_PID_FILE")" 2>/dev/null || true
-          fi
-
-      - name: Display QEMU serial output
-        if: always()
-        run: |
-          if [ -n "${SERIAL_LOG:-}" ] && [ -f "$SERIAL_LOG" ]; then
-            echo "---- QEMU serial (last 200 lines) ----"
-            tail -n 200 "$SERIAL_LOG"
-          fi
-
-      - name: Upload serial log
+      - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-serial
-          path: ${{ env.SERIAL_LOG }}
+          name: repro-results-shard-${{ matrix.shard }}
+          path: |
+            .qemu-run/repro-results.tsv
+            .qemu-run/serial.log
+            .qemu-run/shard-list.txt
           if-no-files-found: ignore
           retention-days: 14
+
+  summarize:
+    needs: [plan, test-in-qemu]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: repro-results-shard-*
+          path: results
+          merge-multiple: false
+
+      - name: Merge summary
+        run: |
+          python3 <<'PY'
+          import collections, os, pathlib
+          root = pathlib.Path("results")
+          c = collections.Counter()
+          rows = 0
+          shards = 0
+          for tsv in root.rglob("repro-results.tsv"):
+              shards += 1
+              with tsv.open() as f:
+                  next(f, None)
+                  for line in f:
+                      parts = line.rstrip("\n").split("\t")
+                      if len(parts) >= 2:
+                          c[parts[1]] += 1
+                          rows += 1
+          print(f"shards_with_results={shards}")
+          print(f"total_repros={rows}")
+          for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
+              print(f"{k}: {v}")
+          # Write step summary for the Actions UI
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as out:
+                  out.write("### QEMU repro suite\n\n")
+                  out.write(f"- Shards with results: **{shards}**\n")
+                  out.write(f"- Repros processed: **{rows}**\n\n")
+                  out.write("| status | count |\n|---|---:|\n")
+                  for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
+                      out.write(f"| {k} | {v} |\n")
+          if rows == 0:
+              raise SystemExit("No repro results collected from any shard")
+          PY

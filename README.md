@@ -9,11 +9,11 @@ newer kernels still hit known bugs.
 | Path | Purpose |
 |------|---------|
 | `crepros/` | C reproducer sources (tracked in git) |
-| `compiled/` | Build output from `./compile.sh` (**not** tracked) |
+| `compiled/` | Optional host-side build output from `./compile.sh` (**not** tracked) |
 | `fetch.py` | Scrape new C repros from syzbot |
-| `compile.sh` | Compile repros to static binaries (local / used by test CI) |
-
-Compiled binaries are not stored in git. Build them on demand.
+| `compile.sh` | Optional host-side compiler helper |
+| `scripts/run-qemu-repros.sh` | Boot QEMU, ship sources, compile+run inside the guest |
+| `scripts/guest-run-repros.sh` | In-guest compile/run loop |
 
 ### Local use
 
@@ -22,11 +22,17 @@ Compiled binaries are not stored in git. Build them on demand.
 python3 -m pip install beautifulsoup4 requests
 python3 fetch.py
 
-# Build (all missing, or a sample)
-./compile.sh                  # compile anything not yet in compiled/
-./compile.sh --limit 50       # at most 50 new binaries
-./compile.sh --force file.c   # rebuild specific sources
-./compile.sh --jobs 8
+# Full suite inside QEMU (compile in guest, 5s run timeout each)
+./scripts/run-qemu-repros.sh
+
+# One shard of 32 (same partitioning as CI)
+SHARD_INDEX=0 SHARD_COUNT=32 ./scripts/run-qemu-repros.sh
+
+# Smoke: 20 sources, 5s timeout
+LIMIT=20 RUN_TIMEOUT=5 ./scripts/run-qemu-repros.sh
+
+# Optional host-side builds (not required for the QEMU path)
+./compile.sh --limit 50
 ```
 
 ### CI workflows
@@ -34,21 +40,27 @@ python3 fetch.py
 | Workflow | Trigger | What it does |
 |----------|---------|----------------|
 | **Fetch Repros** | Daily + changes to `fetch.py` | Runs `fetch.py`, commits new files under `crepros/`; dispatches the QEMU job when something new landed |
-| **Run Tests in QEMU VM** | Weekly + changes under `crepros/` | Compiles a random sample, boots a Debian cloud image in QEMU, runs binaries via 9p |
+| **Run Tests in QEMU VM** | Weekly + changes under `crepros/` / scripts | Partitions **all** `crepros/*.c` across parallel QEMU shards; each guest installs `gcc`, compiles every assigned repro, and runs it with a **5s** timeout |
 
-There is no separate full-tree compile workflow: compiling ~45k static
-binaries is too large for GitHub Actions, and the QEMU job already builds
-whatever sample it needs.
+Pull requests use a small 2×20 smoke so review stays cheap. Push, schedule, and
+manual dispatch run the full sharded suite (default **32** shards).
 
 GitHub disables scheduled workflows after ~60 days of repository inactivity.
 If schedules stop firing, open the Actions tab and click **Enable workflow**,
 or push any commit to the default branch.
 
-Manual runs: **Actions → workflow → Run workflow**.
+Manual runs: **Actions → workflow → Run workflow** (optional `shard_count`,
+`run_timeout`, `limit_per_shard`).
 
-### Notes on the QEMU job
+### In-guest execution model
 
-The GHA job is a **smoke test** (default 32 repros), not a full 40k+ suite.
-Full regression against a custom upstream `bzImage` is intended to be run
-elsewhere with more disk, KVM, and time; this workflow validates that fetch →
-compile → execute still works end-to-end.
+1. Host selects a deterministic shard of `crepros/*.c` and packs a tarball.
+2. QEMU boots a Debian cloud image; cloud-init injects an SSH key.
+3. Guest installs `gcc` / `gcc-multilib` over the network.
+4. For each source: compile (dynamic link, optional `-m32`), run under
+   `timeout -s KILL $RUN_TIMEOUT` (default 5 seconds), delete the binary.
+5. Results land in `repro-results.tsv` (`OK`, `TIMEOUT`, `COMPILE_FAIL`,
+   `EXIT_<n>`) and are uploaded as artifacts per shard.
+
+This is still a **smoke / signal** suite against a distro guest kernel, not a
+full upstream `bzImage` + KASAN syzbot reproduction environment.
