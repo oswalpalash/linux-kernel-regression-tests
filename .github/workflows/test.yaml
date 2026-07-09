@@ -53,22 +53,23 @@ jobs:
       limit: ${{ steps.set.outputs.limit }}
     steps:
       - id: set
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SHARD_COUNT: ${{ github.event.inputs.shard_count }}
+          INPUT_RUN_TIMEOUT: ${{ github.event.inputs.run_timeout }}
+          INPUT_LIMIT: ${{ github.event.inputs.limit_per_shard }}
         run: |
+          set -euo pipefail
           # Defaults: full coverage in 32 shards, 5s run timeout.
-          SC="${{ github.event.inputs.shard_count || '32' }}"
-          RT="${{ github.event.inputs.run_timeout || '5' }}"
-          LIM="${{ github.event.inputs.limit_per_shard || '0' }}"
-          # On pull_request use a tiny smoke so PRs stay cheap; push/schedule/full dispatch use SC.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          SC="${INPUT_SHARD_COUNT:-32}"
+          RT="${INPUT_RUN_TIMEOUT:-5}"
+          LIM="${INPUT_LIMIT:-0}"
+          # On pull_request use a tiny smoke so PRs stay cheap.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
             SC=2
             LIM=20
           fi
-          python3 - "$SC" <<'PY' >> "$GITHUB_OUTPUT"
-          import json, sys
-          n = int(sys.argv[1])
-          print(f"shard_count={n}")
-          print(f"shards={json.dumps(list(range(n)))}")
-          PY
+          python3 -c "import json,sys; n=int(sys.argv[1]); print(f'shard_count={n}'); print('shards='+json.dumps(list(range(n))))" "$SC" >> "$GITHUB_OUTPUT"
           echo "run_timeout=$RT" >> "$GITHUB_OUTPUT"
           echo "limit=$LIM" >> "$GITHUB_OUTPUT"
           echo "Planned shards=$SC run_timeout=$RT limit=$LIM"
@@ -86,7 +87,8 @@ jobs:
       SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
       RUN_TIMEOUT: ${{ needs.plan.outputs.run_timeout }}
       LIMIT: ${{ needs.plan.outputs.limit }}
-      SSH_PORT: ${{ 2200 + matrix.shard }}
+      # Each matrix job is a separate runner VM; the same forward port is fine.
+      SSH_PORT: '2222'
       ARTIFACT_DIR: ${{ github.workspace }}/.qemu-run
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +158,6 @@ jobs:
           print(f"total_repros={rows}")
           for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
               print(f"{k}: {v}")
-          # Write step summary for the Actions UI
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a") as out:
