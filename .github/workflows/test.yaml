@@ -194,19 +194,22 @@ jobs:
           echo "SSH ready as $USER"
 
           SSH=("${SSH_BASE[@]}" "${USER}@127.0.0.1")
+          # Prefer root so scp/run do not fight ownership. If only debian is
+          # available, create the target dir as debian (no sudo) — sudo mkdir
+          # would make it root-owned and scp would get Permission denied.
           if [ "$USER" = "root" ]; then
-            RSH=("${SSH[@]}")
             REMOTE_DIR=/root/repros
+            RUN_AS=("${SSH[@]}")
           else
-            RSH=("${SSH[@]}" sudo -n)
             REMOTE_DIR=/home/debian/repros
+            RUN_AS=("${SSH[@]}")
           fi
 
-          "${RSH[@]}" mkdir -p "$REMOTE_DIR"
+          "${SSH[@]}" mkdir -p "$REMOTE_DIR"
           "${SCP_BASE[@]}" -r compiled/. "${USER}@127.0.0.1:${REMOTE_DIR}/"
           "${SSH[@]}" "ls '$REMOTE_DIR' | wc -l"
 
-          "${RSH[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
+          "${RUN_AS[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
           set +e
           ran=0
           for test_file in "$REMOTE_DIR"/*; do

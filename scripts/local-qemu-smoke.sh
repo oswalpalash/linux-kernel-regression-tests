@@ -153,20 +153,20 @@ fi
 echo "SSH as $USER"
 
 SSH=("${SSH_BASE[@]}" "${USER}@127.0.0.1")
+# Create the upload dir as the SSH user (no sudo). sudo mkdir as debian makes
+# root-owned dirs and scp then fails with Permission denied (seen on GHA).
 if [ "$USER" = "root" ]; then
-  RSH=("${SSH[@]}")
   REMOTE_DIR=/root/repros
 else
-  RSH=("${SSH[@]}" sudo -n)
   REMOTE_DIR=/home/debian/repros
 fi
 
-"${RSH[@]}" mkdir -p "$REMOTE_DIR"
+"${SSH[@]}" mkdir -p "$REMOTE_DIR"
 # scp is more reliable than 9p on stock cloud kernels
 "${SCP_BASE[@]}" -r compiled/. "${USER}@127.0.0.1:${REMOTE_DIR}/"
 echo "copied files: $("${SSH[@]}" "ls '$REMOTE_DIR' | wc -l")"
 
-"${RSH[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
+"${SSH[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
 set +e
 ran=0
 for test_file in "$REMOTE_DIR"/*; do
