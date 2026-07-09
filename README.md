@@ -55,12 +55,16 @@ Manual runs: **Actions → workflow → Run workflow** (optional `shard_count`,
 ### In-guest execution model
 
 1. Host selects a deterministic shard of `crepros/*.c` and packs a tarball.
-2. QEMU boots a Debian cloud image; cloud-init injects an SSH key.
-3. Guest installs `gcc` / `gcc-multilib` over the network.
-4. For each source: compile (dynamic link, optional `-m32`), run under
-   `timeout -s KILL $RUN_TIMEOUT` (default 5 seconds), delete the binary.
+2. QEMU boots a Debian cloud image; cloud-init injects an SSH key and installs
+   `gcc` / `gcc-multilib`.
+3. For each source: compile (dynamic link, optional `-m32`), run under
+   `timeout -s KILL $RUN_TIMEOUT` (default 5 seconds), stream a `RESULT` line
+   to the host, delete the binary.
+4. If the guest panics (common with syz repros), SSH drops; the host records
+   `GUEST_CRASH` for the unfinished file, reboots a fresh VM, and **resumes**
+   the remainder of the shard.
 5. Results land in `repro-results.tsv` (`OK`, `TIMEOUT`, `COMPILE_FAIL`,
-   `EXIT_<n>`) and are uploaded as artifacts per shard.
+   `EXIT_<n>`, `GUEST_CRASH`) and are uploaded as artifacts per shard.
 
-This is still a **smoke / signal** suite against a distro guest kernel, not a
-full upstream `bzImage` + KASAN syzbot reproduction environment.
+This is still a **signal** suite against a distro guest kernel, not a full
+upstream `bzImage` + KASAN syzbot reproduction environment.
