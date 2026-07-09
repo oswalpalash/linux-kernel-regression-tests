@@ -1,0 +1,75 @@
+name: Fetch Repros
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - fetch.py
+      - .github/workflows/fetch.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - fetch.py
+      - .github/workflows/fetch.yml
+  schedule:
+    # Daily 00:00 UTC — keeps the schedule alive when the repo is otherwise quiet
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-repros
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history only if we commit; shallow is fine for fetch+commit
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install beautifulsoup4 requests
+
+      - name: Fetch reproducers from syzbot
+        run: python3 fetch.py
+
+      - name: Commit & push new C sources
+        id: commit
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crepros/
+          if git diff --staged --quiet; then
+            echo "No new reproducers."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(git diff --staged --name-only | wc -l)
+          # Note: do not use [skip ci] — we want compile to be dispatchable below.
+          # GITHUB_TOKEN pushes do not chain-trigger other workflows automatically.
+          git commit -m "crepros: fetch ${count} new reproducer(s)"
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Token pushes do not start other workflows; kick compile explicitly.
+      - name: Dispatch compile workflow
+        if: github.event_name != 'pull_request' && steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run compile.yml --ref main
+          gh workflow run test.yaml --ref main || true

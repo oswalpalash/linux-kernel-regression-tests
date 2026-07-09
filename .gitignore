@@ -1,0 +1,19 @@
+# Compiled reproducer binaries — built in CI / locally via ./compile.sh
+compiled/
+
+# Local QEMU / image artifacts
+*.raw
+*.raw.xz
+*.img
+vmlinux
+vmlinux.xz
+bzImage
+disk.raw*
+qemu-serial.log
+id_rsa
+id_rsa.pub
+
+# Python
+__pycache__/
+*.pyc
+.venv/
