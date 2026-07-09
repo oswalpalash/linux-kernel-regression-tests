@@ -13,11 +13,12 @@ on:
       - fetch.py
       - .github/workflows/fetch.yml
   schedule:
-    # Daily 00:00 UTC — keeps the schedule alive when the repo is otherwise quiet
+    # Daily 00:00 UTC
     - cron: '0 0 * * *'
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: fetch-repros
@@ -30,7 +31,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Need full history only if we commit; shallow is fine for fetch+commit
           fetch-depth: 0
 
       - name: Set up Python
@@ -59,17 +59,14 @@ jobs:
             exit 0
           fi
           count=$(git diff --staged --name-only | wc -l)
-          # Note: do not use [skip ci] — we want compile to be dispatchable below.
           # GITHUB_TOKEN pushes do not chain-trigger other workflows automatically.
           git commit -m "crepros: fetch ${count} new reproducer(s)"
           git push origin HEAD:main
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      # Token pushes do not start other workflows; kick compile explicitly.
-      - name: Dispatch compile workflow
+      # Token pushes do not start other workflows; kick the QEMU smoke test.
+      - name: Dispatch QEMU smoke test
         if: github.event_name != 'pull_request' && steps.commit.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run compile.yml --ref main
-          gh workflow run test.yaml --ref main || true
+        run: gh workflow run test.yaml --ref main

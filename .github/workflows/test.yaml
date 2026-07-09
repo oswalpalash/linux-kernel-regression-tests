@@ -12,12 +12,14 @@ on:
     paths:
       - crepros/**
       - compile.sh
+      - scripts/**
       - .github/workflows/test.yaml
   pull_request:
     branches: [main]
     paths:
       - crepros/**
       - compile.sh
+      - scripts/**
       - .github/workflows/test.yaml
   schedule:
     # Weekly smoke regression (full suite is too large for GHA)
@@ -53,19 +55,27 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
             gcc-multilib genisoimage cloud-utils
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
 
       - name: Build sample of reproducers
         run: |
           set -euo pipefail
           chmod +x ./compile.sh
-          n=$(find crepros -maxdepth 1 -type f -name '*.c' | wc -l)
-          take=$SAMPLE_SIZE
-          if [ "$take" -gt "$n" ]; then take=$n; fi
-          # Sample without shell-glob / ARG_MAX issues
-          find crepros -maxdepth 1 -type f -name '*.c' -print \
-            | awk -v seed="${{ github.run_id }}" 'BEGIN{srand(seed + 0)} {print rand() "\t" $0}' \
-            | sort -n | head -n "$take" | cut -f2- > /tmp/sample-list.txt
-          echo "Selected $take of $n reproducers"
+          python3 - "$SAMPLE_SIZE" "${{ github.run_id }}" <<'PY' > /tmp/sample-list.txt
+          import os, random, sys
+          take, seed = int(sys.argv[1]), sys.argv[2]
+          files = [
+              os.path.join("crepros", f)
+              for f in os.listdir("crepros")
+              if f.endswith(".c")
+          ]
+          random.seed(seed)
+          random.shuffle(files)
+          take = min(take, len(files))
+          for f in files[:take]:
+              print(f)
+          print(f"Selected {take} of {len(files)} reproducers", file=sys.stderr)
+          PY
           mapfile -t sample < /tmp/sample-list.txt
           ./compile.sh --jobs "$(nproc)" --force "${sample[@]}"
           find compiled -type f ! -name '*.err' | wc -l
@@ -80,32 +90,41 @@ jobs:
           ssh-keygen -t ed25519 -N '' -f "${{ github.workspace }}/id_rsa" -C "lkrt-ci"
           PUB=$(cat "${{ github.workspace }}/id_rsa.pub")
 
-          # Indentation-sensitive cloud-config
           cat > user-data <<EOF
           #cloud-config
           hostname: lkrt-ci
           manage_etc_hosts: true
-          users:
-            - name: debian
-              sudo: ALL=(ALL) NOPASSWD:ALL
-              shell: /bin/bash
-              ssh_authorized_keys:
-                - ${PUB}
-            - name: root
-              ssh_authorized_keys:
-                - ${PUB}
           disable_root: false
           ssh_pwauth: false
-          packages: []
+          package_update: false
+          users:
+            - default
+            - name: root
+              lock_passwd: true
+              ssh_authorized_keys:
+                - ${PUB}
+          write_files:
+            - path: /etc/ssh/sshd_config.d/60-lkrt.conf
+              permissions: "0644"
+              content: |
+                PermitRootLogin prohibit-password
+                PasswordAuthentication no
+                PubkeyAuthentication yes
+            - path: /root/.ssh/authorized_keys
+              permissions: "0600"
+              owner: root:root
+              content: |
+                ${PUB}
           runcmd:
-            - [ sh, -c, "sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config" ]
-            - [ sh, -c, "systemctl restart ssh || systemctl restart sshd || true" ]
+            - [ bash, -c, "mkdir -p /home/debian/.ssh /root/.ssh /root/repros" ]
+            - [ bash, -c, "echo '${PUB}' >> /home/debian/.ssh/authorized_keys && chown -R debian:debian /home/debian/.ssh && chmod 700 /home/debian/.ssh && chmod 600 /home/debian/.ssh/authorized_keys" ]
+            - [ bash, -c, "echo '${PUB}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" ]
+            - [ systemctl, restart, ssh ]
           EOF
-          # Strip leading spaces from heredoc (we indented for YAML readability in workflow)
           sed -i 's/^          //' user-data
 
           cat > meta-data <<EOF
-          instance-id: lkrt-ci-1
+          instance-id: lkrt-ci-${{ github.run_id }}
           local-hostname: lkrt-ci
           EOF
           sed -i 's/^          //' meta-data
@@ -117,24 +136,28 @@ jobs:
         run: |
           set -euo pipefail
           SERIAL_LOG="$RUNNER_TEMP/qemu-serial.log"
+          QEMU_PID_FILE="$RUNNER_TEMP/qemu.pid"
+          : > "$SERIAL_LOG"
           echo "SERIAL_LOG=$SERIAL_LOG" >> "$GITHUB_ENV"
+          echo "QEMU_PID_FILE=$QEMU_PID_FILE" >> "$GITHUB_ENV"
 
-          # Boot the cloud image firmware path (no host -kernel): more reliable
-          # across rootfs/kernel skew. TCG is slow but works without nested KVM.
-          sudo qemu-system-x86_64 \
+          ACCEL=tcg
+          if [ -r /dev/kvm ]; then ACCEL=kvm; fi
+          echo "Using accel=$ACCEL"
+
+          # Stock Debian cloud kernels often lack 9p; copy repros in via scp.
+          qemu-system-x86_64 \
             -name lkrt-ci \
-            -machine pc,accel=tcg \
-            -cpu qemu64 \
+            -machine "pc,accel=$ACCEL" \
             -m 2G \
             -smp 2 \
             -drive file=disk.qcow2,format=qcow2,if=virtio \
             -drive file=seed.iso,format=raw,if=virtio,media=cdrom \
             -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
             -device virtio-net-pci,netdev=net0 \
-            -fsdev local,id=fsdev0,path="${{ github.workspace }}/compiled",security_model=none,readonly=on \
-            -device virtio-9p-pci,fsdev=fsdev0,mount_tag=repros \
             -display none \
             -serial file:"$SERIAL_LOG" \
+            -pidfile "$QEMU_PID_FILE" \
             -daemonize
 
           SSH_BASE=(ssh -i "${{ github.workspace }}/id_rsa"
@@ -143,6 +166,12 @@ jobs:
             -o ConnectTimeout=10
             -o LogLevel=ERROR
             -p "$SSH_PORT")
+          SCP_BASE=(scp -i "${{ github.workspace }}/id_rsa"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=10
+            -o LogLevel=ERROR
+            -P "$SSH_PORT")
 
           echo "Waiting for SSH (debian@ then root@)..."
           USER=""
@@ -165,23 +194,22 @@ jobs:
           echo "SSH ready as $USER"
 
           SSH=("${SSH_BASE[@]}" "${USER}@127.0.0.1")
-          # Prefer root for mounts; fall back to sudo -n for debian user
           if [ "$USER" = "root" ]; then
             RSH=("${SSH[@]}")
+            REMOTE_DIR=/root/repros
           else
             RSH=("${SSH[@]}" sudo -n)
+            REMOTE_DIR=/home/debian/repros
           fi
 
-          "${RSH[@]}" mkdir -p /mnt/repros
-          "${RSH[@]}" mount -t 9p -o trans=virtio,version=9p2000.L repros /mnt/repros
-          "${SSH[@]}" "ls /mnt/repros | wc -l"
+          "${RSH[@]}" mkdir -p "$REMOTE_DIR"
+          "${SCP_BASE[@]}" -r compiled/. "${USER}@127.0.0.1:${REMOTE_DIR}/"
+          "${SSH[@]}" "ls '$REMOTE_DIR' | wc -l"
 
-          # Run each binary briefly. Non-zero exit is expected for many syz
-          # repros; serial log captures oopses. Job fails only if none ran.
-          "${RSH[@]}" bash -s <<'EOF'
+          "${RSH[@]}" env REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOF'
           set +e
           ran=0
-          for test_file in /mnt/repros/*; do
+          for test_file in "$REMOTE_DIR"/*; do
             [ -e "$test_file" ] || continue
             [ -f "$test_file" ] || continue
             case "$test_file" in
@@ -203,6 +231,10 @@ jobs:
           fi
           exit 0
           EOF
+
+          if [ -f "$QEMU_PID_FILE" ]; then
+            kill "$(cat "$QEMU_PID_FILE")" 2>/dev/null || true
+          fi
 
       - name: Display QEMU serial output
         if: always()

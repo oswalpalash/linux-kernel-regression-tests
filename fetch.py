@@ -8,17 +8,14 @@ import time
 import logging
 from bs4 import BeautifulSoup
 
-# Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def rate_limited_get(url, last_request_time, lock):
+SYZ_BASE = "https://syzkaller.appspot.com"
+
+
+def rate_limited_get(url, last_request_time, lock, timeout=60):
     """
     Performs a rate-limited HTTP GET request to the specified URL.
-
-    :param url: URL to fetch.
-    :param last_request_time: Shared value indicating the last request time.
-    :param lock: Lock to synchronize access to last_request_time.
-    :return: Response object or None in case of an error.
     """
     try:
         with lock:
@@ -26,82 +23,120 @@ def rate_limited_get(url, last_request_time, lock):
             if current_time - last_request_time.value < 1:
                 time.sleep(1 - (current_time - last_request_time.value))
             last_request_time.value = time.time()
-        response = requests.get(url)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         return response
     except requests.RequestException as e:
-        logging.error(f"Error fetching URL {url}: {e}")
+        logging.error("Error fetching URL %s: %s", url, e)
         return None
+
+
+def has_c_repro(row):
+    """
+    True if this fixed-bug table row advertises a C reproducer.
+
+    Column layout (list_table): Title | Rank | Repro | ... where Rank and Repro
+    both use class="stat". Older code checked stat[0] (Rank) and always missed.
+    """
+    title = row.find("td", class_="title")
+    if not title or not title.find("a"):
+        return False
+    for td in row.find_all("td", class_="stat"):
+        if td.get_text(strip=True) == "C":
+            return True
+        # Sometimes the letter is only inside the link text
+        for a in td.find_all("a"):
+            if a.get_text(strip=True) == "C":
+                return True
+    return False
+
 
 def get_reproducers(bug, last_request_time, lock, output_dir="crepros"):
     """
-    Fetches and saves reproducers for a given bug.
-
-    :param bug: Bug URL fragment.
-    :param last_request_time: Shared value indicating the last request time.
-    :param lock: Lock to synchronize access to last_request_time.
-    :param output_dir: Directory to save reproducers.
+    Fetches and saves C reproducers for a given bug URL fragment.
     """
-    bug_id = bug.split("=")[1]
-    existing_files = [f for f in os.listdir(output_dir) if f.startswith(bug_id)]
-    if existing_files:
-        logging.info(f"Files for bug {bug_id} already exist. Skipping...")
+    bug_id = bug.split("=")[-1]
+    try:
+        existing = any(name.startswith(bug_id) for name in os.listdir(output_dir))
+    except FileNotFoundError:
+        existing = False
+    if existing:
+        logging.info("Files for bug %s already exist. Skipping...", bug_id)
         return
 
-    response = rate_limited_get("https://syzkaller.appspot.com" + bug, last_request_time, lock)
-    if response:
-        try:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            table = soup.find_all('table', class_="list_table")[-1]
-            td = table.find_all('td', string="C")
-            for entry in td:
-                link = entry.find('a').get('href')
-                x = re.search(r'x=(.*)', link).group(1)
-                repro_page = rate_limited_get("https://syzkaller.appspot.com" + link, last_request_time, lock)
-                if repro_page:
-                    with open(os.path.join(output_dir, f"{bug_id}-{x}.c"), 'w+') as f:
-                        f.write(repro_page.text)
-                    logging.info(f"Saved bug {bug_id} with x {x}")
-        except Exception as e:
-            logging.error(f"Error processing bug {bug_id}: {e}")
+    response = rate_limited_get(SYZ_BASE + bug, last_request_time, lock)
+    if not response:
+        return
+
+    try:
+        soup = BeautifulSoup(response.content, "html.parser")
+        tables = soup.find_all("table", class_="list_table")
+        if not tables:
+            logging.warning("No list_table on bug %s", bug_id)
+            return
+
+        # Prefer crash tables that actually link to C repro text
+        saved = 0
+        for table in tables:
+            for a in table.find_all("a"):
+                if a.get_text(strip=True) != "C":
+                    continue
+                link = a.get("href")
+                if not link:
+                    continue
+                m = re.search(r"x=([^&]+)", link)
+                if not m:
+                    continue
+                x = m.group(1)
+                out_path = os.path.join(output_dir, f"{bug_id}-{x}.c")
+                if os.path.exists(out_path):
+                    continue
+                repro_page = rate_limited_get(SYZ_BASE + link, last_request_time, lock)
+                if not repro_page:
+                    continue
+                with open(out_path, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(repro_page.text)
+                saved += 1
+                logging.info("Saved bug %s with x %s", bug_id, x)
+        if saved == 0:
+            logging.info("No new C repro text for bug %s", bug_id)
+    except Exception as e:
+        logging.error("Error processing bug %s: %s", bug_id, e)
+
 
 def main():
-    """
-    Main function to fetch and process bugs.
-    """
     output_dir = "crepros"
     os.makedirs(output_dir, exist_ok=True)
 
-    try:
-        bugs = []
-        manager = multiprocessing.Manager()
-        last_request_time = manager.Value('d', time.time() - 1)
-        lock = manager.Lock()
+    manager = multiprocessing.Manager()
+    last_request_time = manager.Value("d", time.time() - 1)
+    lock = manager.Lock()
 
-        response = rate_limited_get("https://syzkaller.appspot.com/upstream/fixed", last_request_time, lock)
-        if not response:
-            logging.error("Failed to fetch upstream/fixed bug list")
-            return
+    response = rate_limited_get(f"{SYZ_BASE}/upstream/fixed", last_request_time, lock, timeout=120)
+    if not response:
+        raise SystemExit("Failed to fetch upstream/fixed bug list")
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-        rows = soup.find_all('tr')
-        for row in rows:
-            title = row.find_all('td', class_="title")
-            stat = row.find_all('td', class_="stat")
-            if title and stat and "C" in stat[0].text:
-                bugs.append(title[0].find('a').get('href'))
+    soup = BeautifulSoup(response.content, "html.parser")
+    bugs = []
+    for row in soup.find_all("tr"):
+        if not has_c_repro(row):
+            continue
+        href = row.find("td", class_="title").find("a").get("href")
+        if href:
+            bugs.append(href)
 
-        logging.info("Found %d bugs with C reproducers", len(bugs))
-        # Modest pool size; rate limiter serializes HTTP anyway
-        with multiprocessing.Pool(8) as pool:
-            pool.starmap(
-                get_reproducers,
-                ((bug, last_request_time, lock, output_dir) for bug in bugs),
-            )
-        logging.info("Fetch complete")
-    except Exception as e:
-        logging.error(f"Error in main function: {e}")
-        raise
+    # Stable unique order
+    bugs = list(dict.fromkeys(bugs))
+    logging.info("Found %d bugs with C reproducers", len(bugs))
+
+    # Modest pool; rate limiter serializes HTTP to ~1 req/s
+    with multiprocessing.Pool(8) as pool:
+        pool.starmap(
+            get_reproducers,
+            ((bug, last_request_time, lock, output_dir) for bug in bugs),
+        )
+    logging.info("Fetch complete")
+
 
 if __name__ == "__main__":
     main()

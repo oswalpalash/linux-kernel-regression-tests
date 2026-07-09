@@ -11,10 +11,9 @@ newer kernels still hit known bugs.
 | `crepros/` | C reproducer sources (tracked in git) |
 | `compiled/` | Build output from `./compile.sh` (**not** tracked) |
 | `fetch.py` | Scrape new C repros from syzbot |
-| `compile.sh` | Compile repros to static binaries |
+| `compile.sh` | Compile repros to static binaries (local / used by test CI) |
 
-Compiled binaries used to live in this repository (~44 GiB). They are now
-produced on demand in CI or locally and are gitignored.
+Compiled binaries are not stored in git. Build them on demand.
 
 ### Local use
 
@@ -34,13 +33,16 @@ python3 fetch.py
 
 | Workflow | Trigger | What it does |
 |----------|---------|----------------|
-| **Fetch Repros** | Daily + changes to `fetch.py` | Runs `fetch.py`, commits new files under `crepros/` |
-| **Compile reproducers** | Daily + changes under `crepros/` | Compiles sources (no binary commits); uploads `*.err` on failure |
-| **Run Tests in QEMU VM** | Weekly + changes under `crepros/` | Compiles a random sample, boots Debian cloud image in QEMU, runs binaries via 9p |
+| **Fetch Repros** | Daily + changes to `fetch.py` | Runs `fetch.py`, commits new files under `crepros/`; dispatches the QEMU job when something new landed |
+| **Run Tests in QEMU VM** | Weekly + changes under `crepros/` | Compiles a random sample, boots a Debian cloud image in QEMU, runs binaries via 9p |
+
+There is no separate full-tree compile workflow: compiling ~45k static
+binaries is too large for GitHub Actions, and the QEMU job already builds
+whatever sample it needs.
 
 GitHub disables scheduled workflows after ~60 days of repository inactivity.
-If schedules stop firing, open the Actions tab and click **Enable workflow**
-on each workflow, or push any commit to the default branch.
+If schedules stop firing, open the Actions tab and click **Enable workflow**,
+or push any commit to the default branch.
 
 Manual runs: **Actions → workflow → Run workflow**.
 
