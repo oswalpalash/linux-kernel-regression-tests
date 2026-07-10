@@ -67,8 +67,10 @@ Manual runs: **Actions → workflow → Run workflow** (optional `shard_count`,
 
 1. Host selects a deterministic shard of `crepros/*.c` and packs a tarball.
 2. QEMU boots a Debian cloud **rootfs** with either:
-   - **`KERNEL_MODE=kasan` (default):** syzbot **KASAN** `bzImage`, cmdline
-     `oops=panic panic_on_warn=1 panic=0`, QEMU `-no-reboot`, 4G RAM; or
+   - **`KERNEL_MODE=kasan` (default):** current syzbot **KASAN mainline**
+     `bzImage`, cmdline `oops=panic panic_on_warn=1 panic=0`, QEMU
+     `-no-reboot`, 4G RAM — tuned for surfacing memory bugs (kernelCTF-style);
+     or
    - **`KERNEL_MODE=distro`:** stock cloud kernel (smoke only).
    Cloud-init injects an SSH key and installs `gcc` / `gcc-multilib`.
 3. For each source: compile (dynamic link, optional `-m32`), run under
