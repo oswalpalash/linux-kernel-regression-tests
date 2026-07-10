@@ -84,8 +84,11 @@ jobs:
       RUN_TIMEOUT: ${{ needs.plan.outputs.run_timeout }}
       LIMIT: ${{ needs.plan.outputs.limit }}
       SSH_PORT: '2222'
+      # Note: `runner` context is NOT allowed in job-level env (invalidates the
+      # workflow). github.workspace is fine; RUNNER_TEMP is available as a plain
+      # env var inside steps without ${{ runner.temp }}.
       ARTIFACT_DIR: ${{ github.workspace }}/.qemu-run
-      CLOUD_IMAGE_CACHE: ${{ runner.temp }}/debian-12-genericcloud-amd64.qcow2
+      CLOUD_IMAGE_CACHE: ${{ github.workspace }}/.cache/debian-12-genericcloud-amd64.qcow2
     steps:
       - uses: actions/checkout@v4
 
@@ -112,7 +115,8 @@ jobs:
 
       - name: Run shard in QEMU (compile + exec in guest, reboot on panic)
         run: |
-          chmod +x scripts/run-qemu-repros.sh scripts/guest-run-repros.sh
+          chmod +x scripts/run-qemu-repros.sh scripts/guest-run-repros.sh scripts/extract-panic.py
+          mkdir -p "$(dirname "$CLOUD_IMAGE_CACHE")"
           ./scripts/run-qemu-repros.sh
 
       - name: Upload shard results
