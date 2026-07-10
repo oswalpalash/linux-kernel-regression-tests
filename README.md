@@ -22,8 +22,9 @@ newer kernels still hit known bugs.
 python3 -m pip install beautifulsoup4 requests
 python3 fetch.py
 
-# Full suite inside QEMU — default KERNEL_MODE=kasan boots a syzbot KASAN
-# bzImage with panic_on_warn / oops=panic on a Debian cloud rootfs.
+# Full suite inside QEMU — default KERNEL_MODE=kasan boots a *current*
+# syzbot KASAN mainline bzImage (bug-finding / kernelCTF oriented) with
+# panic_on_warn / oops=panic on a Debian cloud rootfs.
 ./scripts/run-qemu-repros.sh
 
 # One shard of 32 (same partitioning as CI)
@@ -39,10 +40,11 @@ KERNEL_MODE=distro LIMIT=10 ./scripts/run-qemu-repros.sh
 ./compile.sh --limit 50
 ```
 
-Pinned kernel URLs live in `scripts/kernel-assets.conf`. Default is **Linux 6.19**
-from the [ci-upstream-kasan-gce](https://syzkaller.appspot.com/upstream/manager/ci-upstream-kasan-gce)
-manager history (`bzImage-05f7e89a`). Override with `BZIMAGE_URL=...` or edit
-that file; re-check the manager table if a pin 404s.
+Pinned kernel URLs live in `scripts/kernel-assets.conf`. Default is the
+**newest** [ci-upstream-kasan-gce](https://syzkaller.appspot.com/upstream/manager/ci-upstream-kasan-gce)
+build we last verified (mainline KASAN — goal is finding bugs, not tracking a
+stable branch). Bump the pin from that manager’s top “kernel image” row when
+you want fresher coverage; override with `BZIMAGE_URL=...` anytime.
 
 ### CI workflows
 
