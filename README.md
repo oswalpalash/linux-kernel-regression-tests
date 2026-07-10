@@ -39,8 +39,10 @@ KERNEL_MODE=distro LIMIT=10 ./scripts/run-qemu-repros.sh
 ./compile.sh --limit 50
 ```
 
-Pinned kernel URLs live in `scripts/kernel-assets.conf` (refresh from a recent
-syzbot bug assets list when needed).
+Pinned kernel URLs live in `scripts/kernel-assets.conf`. Default is **Linux 6.19**
+from the [ci-upstream-kasan-gce](https://syzkaller.appspot.com/upstream/manager/ci-upstream-kasan-gce)
+manager history (`bzImage-05f7e89a`). Override with `BZIMAGE_URL=...` or edit
+that file; re-check the manager table if a pin 404s.
 
 ### CI workflows
 

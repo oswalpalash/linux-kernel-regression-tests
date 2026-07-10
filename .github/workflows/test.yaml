@@ -96,7 +96,8 @@ jobs:
       # runner context is NOT allowed in job-level env (breaks workflow parse).
       ARTIFACT_DIR: ${{ github.workspace }}/.qemu-run
       CLOUD_IMAGE_CACHE: ${{ github.workspace }}/.cache/debian-12-genericcloud-amd64.qcow2
-      BZIMAGE_CACHE: ${{ github.workspace }}/.cache/bzImage-c245a7a7.xz
+      # Must match scripts/kernel-assets.conf pin (Linux 6.19 / 05f7e89a).
+      BZIMAGE_CACHE: ${{ github.workspace }}/.cache/bzImage-05f7e89a.xz
       QEMU_MEM: 4G
     steps:
       - uses: actions/checkout@v4
@@ -130,7 +131,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.BZIMAGE_CACHE }}
-          key: syzbot-bzImage-c245a7a7-v1
+          key: syzbot-bzImage-05f7e89a-linux-6.19-v1
 
       - name: Run shard in QEMU (KASAN kernel, reboot on panic)
         run: |
