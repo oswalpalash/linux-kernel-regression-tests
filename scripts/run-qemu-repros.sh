@@ -275,21 +275,12 @@ wait_ssh() {
 ensure_gcc() {
 	local user=$1
 	local ssh=("${SSH_BASE[@]}" "${user}@127.0.0.1")
-	echo "Waiting for cloud-init / gcc..."
+	# Quotes must be embedded in the remote command (ssh strips local quotes).
+	echo "Waiting for cloud-init (if any)..."
 	"${ssh[@]}" "cloud-init status --wait 2>/dev/null || true" || true
-	local i
-	for i in $(seq 1 90); do
-		if "${ssh[@]}" "command -v gcc >/dev/null 2>&1"; then
-			break
-		fi
-		"${ssh[@]}" "sh -c 'while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 2; done'" || true
-		if [[ $((i % 6)) -eq 0 ]]; then
-			echo "  still waiting for gcc ($i/90)..."
-		fi
-		sleep 5
-	done
+	"${ssh[@]}" "sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done'" || true
 	if ! "${ssh[@]}" "command -v gcc >/dev/null 2>&1"; then
-		echo "gcc still missing; installing via apt..."
+		echo "Installing gcc via apt..."
 		if [[ "$user" == "root" ]]; then
 			"${ssh[@]}" "sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends gcc gcc-multilib libc6-dev'"
 		else
