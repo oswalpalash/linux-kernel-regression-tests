@@ -1,8 +1,12 @@
 #!/bin/bash
 # Runs inside the QEMU guest: compile each C repro and execute it with a short timeout.
 #
-# Prints one machine-readable line per finished repro to stdout (line-buffered):
+# Protocol on stdout (line-buffered, flushed):
+#   BEGIN\t<file>          — about to compile/run this repro
 #   RESULT\t<file>\t<status>\t<compile_rc>\t<run_rc>
+#
+# Also stamps the QEMU serial console with LKRT_BEGIN / LKRT_END so a panic
+# after BEGIN can be attributed to that repro from the host serial log.
 #
 # Env:
 #   CREPROS_DIR, RUN_TIMEOUT (default 5), COMPILE_TIMEOUT (default 30),
@@ -35,9 +39,26 @@ if [[ -n "$RESULTS_FILE" ]]; then
 	printf 'file\tstatus\tcompile_rc\trun_rc\n' >"$RESULTS_FILE"
 fi
 
-emit() {
-	# Flush immediately so the host keeps results even if the next repro panics.
+# Stamp both stdout (host SSH stream) and the physical console (QEMU serial).
+console_stamp() {
+	# $1=tag $2=name
+	local msg="$1 $2"
+	echo "$msg" >&2
+	# /dev/console reaches the VGA/serial console used by QEMU -serial file:
+	echo "$msg" >/dev/console 2>/dev/null || echo "$msg" >/dev/ttyS0 2>/dev/null || true
+	# Nudge the log so the stamp is less likely to sit in a kernel buffer.
+	echo >/dev/console 2>/dev/null || true
+}
+
+emit_begin() {
+	python3 -c 'import sys; print("BEGIN\t" + sys.argv[1], flush=True)' "$1"
+	console_stamp "LKRT_BEGIN" "$1"
+}
+
+emit_result() {
+	# $1=file $2=status $3=compile_rc $4=run_rc
 	python3 -c 'import sys; print("RESULT\t" + "\t".join(sys.argv[1:]), flush=True)' "$1" "$2" "$3" "$4"
+	console_stamp "LKRT_END" "$1"
 	if [[ -n "$RESULTS_FILE" ]]; then
 		printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >>"$RESULTS_FILE"
 		sync "$RESULTS_FILE" 2>/dev/null || true
@@ -53,7 +74,7 @@ done_n=0
 for f in "${sources[@]}"; do
 	base="$(basename "$f")"
 	done_n=$((done_n + 1))
-	echo "BEGIN $base" >&2
+	emit_begin "$base"
 
 	flags=()
 	if grep -q '__NR_mmap2' "$f" 2>/dev/null; then
@@ -64,11 +85,12 @@ for f in "${sources[@]}"; do
 	timeout -s KILL "$COMPILE_TIMEOUT" gcc "$f" -pthread "${flags[@]}" -o "$bin" >/tmp/repro-compile.err 2>&1
 	crc=$?
 	if [[ "$crc" -ne 0 ]]; then
-		emit "$base" "COMPILE_FAIL" "$crc" "-"
+		emit_result "$base" "COMPILE_FAIL" "$crc" "-"
 		compile_fail=$((compile_fail + 1))
 		rm -f "$bin"
 	else
 		workdir="$(mktemp -d /tmp/repro-wd-XXXXXX)"
+		# Drop caches so oops paths are a bit noisier / less deferred? skip — costly.
 		set +e
 		(cd "$workdir" && timeout -s KILL "$RUN_TIMEOUT" "$bin") >/dev/null 2>&1
 		rrc=$?
@@ -82,11 +104,10 @@ for f in "${sources[@]}"; do
 			status="OK"
 			ok=$((ok + 1))
 		else
-			# segfault=139, etc. — expected for many syz repros
 			status="EXIT_${rrc}"
 			run_nonzero=$((run_nonzero + 1))
 		fi
-		emit "$base" "$status" "0" "$rrc"
+		emit_result "$base" "$status" "0" "$rrc"
 	fi
 
 	if [[ $((done_n % PROGRESS_EVERY)) -eq 0 || "$done_n" -eq "$total_sources" ]]; then

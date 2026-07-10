@@ -122,7 +122,9 @@ jobs:
           name: repro-results-shard-${{ matrix.shard }}
           path: |
             .qemu-run/repro-results.tsv
-            .qemu-run/serial.log
+            .qemu-run/panics.tsv
+            .qemu-run/crashes/**
+            .qemu-run/serial/**
             .qemu-run/shard-list.txt
             .qemu-run/guest-stderr.log
           if-no-files-found: ignore
@@ -148,7 +150,7 @@ jobs:
           c = collections.Counter()
           rows = 0
           shards = 0
-          crashes = 0
+          panics = []
           for tsv in root.rglob("repro-results.tsv"):
               shards += 1
               with tsv.open() as f:
@@ -158,24 +160,37 @@ jobs:
                       if len(parts) >= 2:
                           c[parts[1]] += 1
                           rows += 1
-                          if parts[1] == "GUEST_CRASH":
-                              crashes += 1
+                          if parts[1] in ("PANIC", "GUEST_CRASH"):
+                              title = parts[4] if len(parts) > 4 else ""
+                              report = parts[5] if len(parts) > 5 else ""
+                              panics.append((parts[0], parts[1], title, report, str(tsv)))
           print(f"shards_with_results={shards}")
           print(f"total_repros={rows}")
           for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
               print(f"{k}: {v}")
+          print(f"panic_or_crash_rows={len(panics)}")
+          for repro, status, title, report, src in panics[:50]:
+              print(f"  {status:12} {repro}: {title[:140]}")
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a") as out:
                   out.write("### QEMU repro suite\n\n")
                   out.write(f"- Shards with results: **{shards}**\n")
                   out.write(f"- Repros processed: **{rows}**\n")
-                  out.write(f"- Guest crashes (panic/SSH drop): **{crashes}**\n\n")
+                  out.write(f"- Panics / guest crashes: **{len(panics)}**\n\n")
                   out.write("| status | count |\n|---|---:|\n")
                   for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
                       out.write(f"| {k} | {v} |\n")
+                  if panics:
+                      out.write("\n### Panic attribution (who / why)\n\n")
+                      out.write("| repro | status | title |\n|---|---|---|\n")
+                      for repro, status, title, report, src in panics[:100]:
+                          t = (title or "").replace("|", "\\|")[:160]
+                          out.write(f"| `{repro}` | {status} | {t} |\n")
+                      out.write(
+                          "\nFull serial excerpts are in the `repro-results-shard-*` "
+                          "artifacts under `crashes/*.md`.\n"
+                      )
           if rows == 0:
               raise SystemExit("No repro results collected from any shard")
-          # Suite succeeds if we produced a full (or partial-but-nonempty) ledger.
-          # GUEST_CRASH is an expected outcome for syz repros, not a CI red X.
           PY

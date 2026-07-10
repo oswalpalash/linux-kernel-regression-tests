@@ -60,11 +60,14 @@ Manual runs: **Actions → workflow → Run workflow** (optional `shard_count`,
 3. For each source: compile (dynamic link, optional `-m32`), run under
    `timeout -s KILL $RUN_TIMEOUT` (default 5 seconds), stream a `RESULT` line
    to the host, delete the binary.
-4. If the guest panics (common with syz repros), SSH drops; the host records
-   `GUEST_CRASH` for the unfinished file, reboots a fresh VM, and **resumes**
-   the remainder of the shard.
-5. Results land in `repro-results.tsv` (`OK`, `TIMEOUT`, `COMPILE_FAIL`,
-   `EXIT_<n>`, `GUEST_CRASH`) and are uploaded as artifacts per shard.
+4. If the guest panics, SSH drops. The host attributes the crash to the repro
+   that last emitted `BEGIN` / `LKRT_BEGIN` (also stamped on the QEMU serial
+   console), scrapes the serial log for oops/panic text, and writes
+   `crashes/<repro>.md` with the excerpt. Status is `PANIC` when an oops
+   signature is found, otherwise `GUEST_CRASH`. The VM is rebooted and the
+   suite **resumes** the remainder of the shard.
+5. Results land in `repro-results.tsv` plus `panics.tsv` and per-crash
+   markdown reports (uploaded as CI artifacts).
 
 This is still a **signal** suite against a distro guest kernel, not a full
 upstream `bzImage` + KASAN syzbot reproduction environment.
