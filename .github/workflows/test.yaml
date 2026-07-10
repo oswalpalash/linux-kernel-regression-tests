@@ -1,8 +1,8 @@
 name: Run Tests in QEMU VM
 
-# Compile each C repro *inside* a QEMU guest and run it with a short timeout.
-# Sharded across runners. Guest panics (common with syz repros) reboot and
-# resume; the offending repro is recorded as GUEST_CRASH.
+# Compile each C repro inside a QEMU guest and run it with a short timeout.
+# Default guest kernel: syzbot KASAN bzImage with panic_on_warn / oops=panic.
+# Sharded across runners; guest panics reboot, attribute, and resume.
 
 on:
   workflow_dispatch:
@@ -19,6 +19,10 @@ on:
         description: 'Max sources per shard (0 = all assigned to that shard)'
         required: false
         default: '0'
+      kernel_mode:
+        description: 'Guest kernel: kasan (syzbot instrumented) or distro'
+        required: false
+        default: 'kasan'
   push:
     branches: [main]
     paths:
@@ -49,6 +53,7 @@ jobs:
       shard_count: ${{ steps.set.outputs.shard_count }}
       run_timeout: ${{ steps.set.outputs.run_timeout }}
       limit: ${{ steps.set.outputs.limit }}
+      kernel_mode: ${{ steps.set.outputs.kernel_mode }}
     steps:
       - id: set
         env:
@@ -56,11 +61,13 @@ jobs:
           INPUT_SHARD_COUNT: ${{ github.event.inputs.shard_count }}
           INPUT_RUN_TIMEOUT: ${{ github.event.inputs.run_timeout }}
           INPUT_LIMIT: ${{ github.event.inputs.limit_per_shard }}
+          INPUT_KERNEL_MODE: ${{ github.event.inputs.kernel_mode }}
         run: |
           set -euo pipefail
           SC="${INPUT_SHARD_COUNT:-32}"
           RT="${INPUT_RUN_TIMEOUT:-5}"
           LIM="${INPUT_LIMIT:-0}"
+          KM="${INPUT_KERNEL_MODE:-kasan}"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             SC=2
             LIM=20
@@ -68,7 +75,8 @@ jobs:
           python3 -c "import json,sys; n=int(sys.argv[1]); print(f'shard_count={n}'); print('shards='+json.dumps(list(range(n))))" "$SC" >> "$GITHUB_OUTPUT"
           echo "run_timeout=$RT" >> "$GITHUB_OUTPUT"
           echo "limit=$LIM" >> "$GITHUB_OUTPUT"
-          echo "Planned shards=$SC run_timeout=$RT limit=$LIM"
+          echo "kernel_mode=$KM" >> "$GITHUB_OUTPUT"
+          echo "Planned shards=$SC run_timeout=$RT limit=$LIM kernel_mode=$KM"
 
   test-in-qemu:
     needs: plan
@@ -83,20 +91,24 @@ jobs:
       SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
       RUN_TIMEOUT: ${{ needs.plan.outputs.run_timeout }}
       LIMIT: ${{ needs.plan.outputs.limit }}
+      KERNEL_MODE: ${{ needs.plan.outputs.kernel_mode }}
       SSH_PORT: '2222'
-      # Note: `runner` context is NOT allowed in job-level env (invalidates the
-      # workflow). github.workspace is fine; RUNNER_TEMP is available as a plain
-      # env var inside steps without ${{ runner.temp }}.
+      # runner context is NOT allowed in job-level env (breaks workflow parse).
       ARTIFACT_DIR: ${{ github.workspace }}/.qemu-run
       CLOUD_IMAGE_CACHE: ${{ github.workspace }}/.cache/debian-12-genericcloud-amd64.qcow2
+      BZIMAGE_CACHE: ${{ github.workspace }}/.cache/bzImage-c245a7a7.xz
+      QEMU_MEM: 4G
     steps:
       - uses: actions/checkout@v4
 
-      # Lightweight free-space (full maximize-build-space is overkill now).
       - name: Free some disk
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            "$AGENT_TOOLSDIRECTORY" || true
+          # Only reclaim space if free disk is tight (saves ~1min when already ok).
+          avail_kb=$(df -Pk . | awk 'NR==2{print $4}')
+          if [ "$avail_kb" -lt 15000000 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+              "$AGENT_TOOLSDIRECTORY" || true
+          fi
           df -h
 
       - name: Install host dependencies
@@ -104,7 +116,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
-            genisoimage cloud-utils
+            genisoimage cloud-utils xz-utils
           sudo chmod 666 /dev/kvm 2>/dev/null || true
 
       - name: Cache Debian cloud image
@@ -113,10 +125,17 @@ jobs:
           path: ${{ env.CLOUD_IMAGE_CACHE }}
           key: debian-12-genericcloud-amd64-qcow2-v1
 
-      - name: Run shard in QEMU (compile + exec in guest, reboot on panic)
+      - name: Cache syzbot KASAN bzImage
+        if: env.KERNEL_MODE == 'kasan'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BZIMAGE_CACHE }}
+          key: syzbot-bzImage-c245a7a7-v1
+
+      - name: Run shard in QEMU (KASAN kernel, reboot on panic)
         run: |
           chmod +x scripts/run-qemu-repros.sh scripts/guest-run-repros.sh scripts/extract-panic.py
-          mkdir -p "$(dirname "$CLOUD_IMAGE_CACHE")"
+          mkdir -p "$(dirname "$CLOUD_IMAGE_CACHE")" "$(dirname "$BZIMAGE_CACHE")"
           ./scripts/run-qemu-repros.sh
 
       - name: Upload shard results
@@ -127,8 +146,8 @@ jobs:
           path: |
             .qemu-run/repro-results.tsv
             .qemu-run/panics.tsv
-            .qemu-run/crashes/**
-            .qemu-run/serial/**
+            .qemu-run/crashes
+            .qemu-run/serial
             .qemu-run/shard-list.txt
             .qemu-run/guest-stderr.log
           if-no-files-found: ignore

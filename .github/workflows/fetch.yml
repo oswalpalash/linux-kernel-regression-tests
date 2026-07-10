@@ -13,7 +13,6 @@ on:
       - fetch.py
       - .github/workflows/fetch.yml
   schedule:
-    # Daily 00:00 UTC
     - cron: '0 0 * * *'
 
 permissions:
@@ -22,7 +21,7 @@ permissions:
 
 concurrency:
   group: fetch-repros
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   fetch:
@@ -32,6 +31,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Ensure push credentials are available for later steps.
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,6 +52,7 @@ jobs:
         id: commit
         if: github.event_name != 'pull_request'
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crepros/
@@ -59,13 +62,13 @@ jobs:
             exit 0
           fi
           count=$(git diff --staged --name-only | wc -l)
-          # GITHUB_TOKEN pushes do not chain-trigger other workflows automatically.
           git commit -m "crepros: fetch ${count} new reproducer(s)"
+          # Rebase onto any concurrent main updates (other workflow pushes).
+          git pull --rebase origin main
           git push origin HEAD:main
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      # Token pushes do not start other workflows; kick the QEMU smoke test.
-      - name: Dispatch QEMU smoke test
+      - name: Dispatch QEMU suite
         if: github.event_name != 'pull_request' && steps.commit.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

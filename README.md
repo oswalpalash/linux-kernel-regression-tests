@@ -22,7 +22,8 @@ newer kernels still hit known bugs.
 python3 -m pip install beautifulsoup4 requests
 python3 fetch.py
 
-# Full suite inside QEMU (compile in guest, 5s run timeout each)
+# Full suite inside QEMU — default KERNEL_MODE=kasan boots a syzbot KASAN
+# bzImage with panic_on_warn / oops=panic on a Debian cloud rootfs.
 ./scripts/run-qemu-repros.sh
 
 # One shard of 32 (same partitioning as CI)
@@ -31,9 +32,15 @@ SHARD_INDEX=0 SHARD_COUNT=32 ./scripts/run-qemu-repros.sh
 # Smoke: 20 sources, 5s timeout
 LIMIT=20 RUN_TIMEOUT=5 ./scripts/run-qemu-repros.sh
 
+# Stock distro kernel (weak signal, no KASAN)
+KERNEL_MODE=distro LIMIT=10 ./scripts/run-qemu-repros.sh
+
 # Optional host-side builds (not required for the QEMU path)
 ./compile.sh --limit 50
 ```
+
+Pinned kernel URLs live in `scripts/kernel-assets.conf` (refresh from a recent
+syzbot bug assets list when needed).
 
 ### CI workflows
 
@@ -55,8 +62,11 @@ Manual runs: **Actions → workflow → Run workflow** (optional `shard_count`,
 ### In-guest execution model
 
 1. Host selects a deterministic shard of `crepros/*.c` and packs a tarball.
-2. QEMU boots a Debian cloud image; cloud-init injects an SSH key and installs
-   `gcc` / `gcc-multilib`.
+2. QEMU boots a Debian cloud **rootfs** with either:
+   - **`KERNEL_MODE=kasan` (default):** syzbot **KASAN** `bzImage`, cmdline
+     `oops=panic panic_on_warn=1 panic=0`, QEMU `-no-reboot`, 4G RAM; or
+   - **`KERNEL_MODE=distro`:** stock cloud kernel (smoke only).
+   Cloud-init injects an SSH key and installs `gcc` / `gcc-multilib`.
 3. For each source: compile (dynamic link, optional `-m32`), run under
    `timeout -s KILL $RUN_TIMEOUT` (default 5 seconds), stream a `RESULT` line
    to the host, delete the binary.

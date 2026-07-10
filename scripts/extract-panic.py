@@ -27,6 +27,9 @@ PANIC_HINTS = re.compile(
     r"|Unable to handle kernel"
     r"|KASAN:"
     r"|UBSAN:"
+    r"|BUG: KASAN:"
+    r"|BUG: KFENCE:"
+    r"|BUG: soft lockup"
     r"|WARNING: CPU:"
     r"|RIP:"
     r"|Call Trace:"
@@ -34,6 +37,7 @@ PANIC_HINTS = re.compile(
     r"|invalid opcode:"
     r"|divide error:"
     r"|stack segment:"
+    r"|smp: softlockup"
     r")",
     re.IGNORECASE,
 )

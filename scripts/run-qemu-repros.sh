@@ -12,10 +12,14 @@
 #   LIMIT=50 RUN_TIMEOUT=5 ./scripts/run-qemu-repros.sh
 #
 # Env: SHARD_INDEX, SHARD_COUNT, RUN_TIMEOUT, COMPILE_TIMEOUT, LIMIT,
-#      SSH_PORT, ARTIFACT_DIR, KEEP_VM, DISK_SIZE_G, MAX_REBOOTS (default 200)
+#      SSH_PORT, ARTIFACT_DIR, KEEP_VM, DISK_SIZE_G, MAX_REBOOTS (default 200),
+#      KERNEL_MODE (kasan|distro), BZIMAGE_URL, QEMU_MEM, KERNEL_APPEND_EXTRAS
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# shellcheck source=kernel-assets.conf
+source scripts/kernel-assets.conf
 
 SHARD_INDEX="${SHARD_INDEX:-0}"
 SHARD_COUNT="${SHARD_COUNT:-1}"
@@ -27,8 +31,10 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$PWD/.qemu-run}"
 KEEP_VM="${KEEP_VM:-0}"
 DISK_SIZE_G="${DISK_SIZE_G:-8}"
 MAX_REBOOTS="${MAX_REBOOTS:-200}"
+KERNEL_MODE="${KERNEL_MODE:-kasan}"
+QEMU_MEM="${QEMU_MEM:-4G}"
 
-mkdir -p "$ARTIFACT_DIR/crashes" "$ARTIFACT_DIR/serial"
+mkdir -p "$ARTIFACT_DIR/crashes" "$ARTIFACT_DIR/serial" "$ARTIFACT_DIR/kernel"
 QEMU_PID_FILE="$ARTIFACT_DIR/qemu.pid"
 RESULTS_HOST="$ARTIFACT_DIR/repro-results.tsv"
 PANICS_INDEX="$ARTIFACT_DIR/panics.tsv"
@@ -38,6 +44,7 @@ CURRENT_REPRO_FILE="$ARTIFACT_DIR/current-repro.txt"
 ID_RSA="$ARTIFACT_DIR/id_rsa"
 DISK_IMG="$ARTIFACT_DIR/disk.qcow2"
 SEED_ISO="$ARTIFACT_DIR/seed.iso"
+BZIMAGE_PATH="$ARTIFACT_DIR/kernel/bzImage"
 # Active serial for this boot cycle (also concatenated into serial/all.log)
 SERIAL_LOG="$ARTIFACT_DIR/serial/current.log"
 SERIAL_ALL="$ARTIFACT_DIR/serial/all.log"
@@ -75,11 +82,30 @@ cp "$SHARD_LIST" "$REMAINING_LIST"
 printf 'file\tstatus\tcompile_rc\trun_rc\tpanic_title\treport\n' >"$RESULTS_HOST"
 printf 'repro\tcycle\ttitle\treport\n' >"$PANICS_INDEX"
 
-# --- image + ssh key (once) -------------------------------------------------
+# --- image + kernel + ssh key (once) ----------------------------------------
 img_url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
 cache="${CLOUD_IMAGE_CACHE:-/tmp/debian-12-genericcloud-amd64.qcow2}"
 if [[ ! -f "$cache" ]]; then
+	echo "Downloading Debian cloud image..."
 	wget -q --show-progress -O "$cache" "$img_url"
+fi
+
+if [[ "$KERNEL_MODE" == "kasan" ]]; then
+	bz_cache="${BZIMAGE_CACHE:-/tmp/$(basename "$BZIMAGE_URL")}"
+	if [[ ! -f "$bz_cache" ]]; then
+		echo "Downloading KASAN bzImage from syzbot assets..."
+		wget -q --show-progress -O "$bz_cache" "$BZIMAGE_URL"
+	fi
+	if [[ "$bz_cache" == *.xz ]]; then
+		echo "Decompressing bzImage..."
+		xz -dkc "$bz_cache" >"$BZIMAGE_PATH"
+	else
+		cp -f "$bz_cache" "$BZIMAGE_PATH"
+	fi
+	ls -lh "$BZIMAGE_PATH"
+	echo "KERNEL_MODE=kasan append extras: $KERNEL_APPEND_EXTRAS"
+else
+	echo "KERNEL_MODE=distro (stock cloud kernel; weak signal)"
 fi
 
 if [[ ! -f "$ID_RSA" ]]; then
@@ -93,13 +119,11 @@ hostname: lkrt-ci
 manage_etc_hosts: true
 disable_root: false
 ssh_pwauth: false
-package_update: true
-packages:
-  - gcc
-  - gcc-multilib
-  - libc6-dev
-  - make
-  - ca-certificates
+# Avoid blocking boot on package installs when the guest net stack is still
+# settling under a syzbot kernel (many virtual NICs). ensure_gcc() installs
+# the toolchain after SSH is up.
+package_update: false
+packages: []
 users:
   - default
   - name: root
@@ -173,32 +197,53 @@ stop_qemu() {
 start_qemu() {
 	local cycle=$1
 	stop_qemu
+	# Fresh disk each boot so a corrupted rootfs after panic cannot stick.
 	cp -f "$cache" "$DISK_IMG"
 	qemu-img resize "$DISK_IMG" "${DISK_SIZE_G}G" >/dev/null
 	SERIAL_LOG="$ARTIFACT_DIR/serial/cycle-${cycle}.log"
 	: >"$SERIAL_LOG"
 	{
-		echo "===== START CYCLE ${cycle} $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+		echo "===== START CYCLE ${cycle} mode=${KERNEL_MODE} $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
 	} >>"$SERIAL_ALL"
 
 	ACCEL=tcg
 	if [[ -r /dev/kvm ]]; then ACCEL=kvm; fi
-	echo "Starting QEMU accel=$ACCEL cycle=$cycle"
+	echo "Starting QEMU accel=$ACCEL mem=$QEMU_MEM mode=$KERNEL_MODE cycle=$cycle"
 
-	# stdio backend is less ideal; file: captures panic text after SSH dies.
-	qemu-system-x86_64 \
-		-name "lkrt-ci-s${SHARD_INDEX}" \
-		-machine "pc,accel=$ACCEL" \
-		-m 2G \
-		-smp 2 \
-		-drive "file=$DISK_IMG,format=qcow2,if=virtio" \
-		-drive "file=$SEED_ISO,format=raw,if=virtio,media=cdrom" \
-		-netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22" \
-		-device virtio-net-pci,netdev=net0 \
-		-display none \
-		-serial "file:$SERIAL_LOG" \
-		-pidfile "$QEMU_PID_FILE" \
+	# e1000 is more reliable than virtio-net under syzbot kernels (which
+	# register dozens of dummy NICs and often leave virtio eth without carrier).
+	local -a qemu_cmd=(
+		qemu-system-x86_64
+		-name "lkrt-ci-s${SHARD_INDEX}"
+		-machine "pc,accel=$ACCEL"
+		-m "$QEMU_MEM"
+		-smp 2
+		-drive "file=$DISK_IMG,format=qcow2,if=virtio"
+		-drive "file=$SEED_ISO,format=raw,if=virtio,media=cdrom"
+		-netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22"
+		-device e1000,netdev=net0
+		-display none
+		-serial "file:$SERIAL_LOG"
+		-pidfile "$QEMU_PID_FILE"
 		-daemonize
+	)
+
+	if [[ "$KERNEL_MODE" == "kasan" ]]; then
+		# Boot syzbot-style instrumented kernel on the Debian cloud rootfs.
+		# -no-reboot keeps the panic frame on serial for extract-panic.py.
+		# root=/dev/vda1 is the first virtio disk partition of the cloud image.
+		local append="root=/dev/vda1 rootfstype=ext4 rw console=ttyS0 earlyprintk=serial"
+		append+=" net.ifnames=0 ip=dhcp ${KERNEL_APPEND_EXTRAS}"
+		qemu_cmd+=(
+			-kernel "$BZIMAGE_PATH"
+			-append "$append"
+			-no-reboot
+		)
+		echo "  kernel=$BZIMAGE_PATH"
+		echo "  append=$append"
+	fi
+
+	"${qemu_cmd[@]}"
 	echo "QEMU pid $(cat "$QEMU_PID_FILE") serial=$SERIAL_LOG"
 }
 
